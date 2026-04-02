@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 import aio_pika
@@ -30,13 +31,18 @@ def load_config() -> dict:
 
     rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672//")
     queue_name = os.getenv("QUEUE_NAME", "my_queue")
+    ru_queue_name = os.getenv("RU_QUEUE_NAME", "ru_queue")
 
     if not queue_name or not queue_name.strip():
         raise ValueError("QUEUE_NAME не должен быть пустым")
 
+    if not ru_queue_name or not ru_queue_name.strip():
+        raise ValueError("RU_QUEUE_NAME не должен быть пустым")
+
     return {
         "rabbitmq_url": rabbitmq_url,
         "queue_name": queue_name.strip(),
+        "ru_queue_name": ru_queue_name.strip(),
     }
 
 #устанавливаем асинхронное подключение
@@ -62,17 +68,27 @@ async def publish_message(channel, queue_name: str, payload: str) -> None:
         routing_key=queue_name,
     )
 
+#если в сообщении кириллица, отправляем в ru очередь
+def detect_queue_by_language(payload: str, default_queue: str, ru_queue: str) -> str:
+    if re.search(r"[А-Яа-яЁё]", payload):
+        return ru_queue
+    return default_queue
+
 #подготавливаем подключение к RabbitMQ при старте FastAPI-приложения
 @producer_app.on_event("startup")
 async def on_startup() -> None:
     config = load_config()
 
     connection = await connect_rabbitmq(config["rabbitmq_url"])
-    channel, _queue = await ensure_queue(connection, config["queue_name"])
+    channel = await connection.channel()
+
+    await channel.declare_queue(config["queue_name"], durable=True)
+    await channel.declare_queue(config["ru_queue_name"], durable=True)
 
     producer_app.state.connection = connection
     producer_app.state.channel = channel
     producer_app.state.queue_name = config["queue_name"]
+    producer_app.state.ru_queue_name = config["ru_queue_name"]
     producer_app.state.config = config
 
 #закрываем подключение к RabbitMQ при остановке приложения
@@ -90,13 +106,18 @@ async def publish_endpoint(req: PublishRequest):
 
     channel = getattr(producer_app.state, "channel", None)
     queue_name = getattr(producer_app.state, "queue_name", None)
+    ru_queue_name = getattr(producer_app.state, "ru_queue_name", None)
 
     if channel is None or queue_name is None:
         raise HTTPException(status_code=500, detail="RabbitMQ не инициализирован")
 
-    await publish_message(channel, queue_name, req.message.strip())
+    message_text = req.message.strip()
+    target_queue = detect_queue_by_language(message_text, queue_name, ru_queue_name)
+
+    await publish_message(channel, target_queue, message_text)
 
     return {
         "status": "ok",
-        "sent": req.message.strip(),
+        "sent": message_text,
+        "target_queue": target_queue,
     }

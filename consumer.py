@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
 import aio_pika
@@ -17,6 +18,7 @@ def load_config() -> dict:
 
     rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672//")
     queue_name = os.getenv("QUEUE_NAME", "my_queue")
+    ru_queue_name = os.getenv("RU_QUEUE_NAME", "ru_queue")
 
     if not queue_name or not queue_name.strip():
         raise ValueError("QUEUE_NAME не должен быть пустым")
@@ -24,6 +26,7 @@ def load_config() -> dict:
     return {
         "rabbitmq_url": rabbitmq_url,
         "queue_name": queue_name.strip(),
+        "ru_queue_name": ru_queue_name.strip(),
     }
 
 #устанавливаем асинхронное подключеник к RabbitMQ
@@ -44,12 +47,12 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         print(f"Received message: {payload}")
 
 #запускаем consumer, который слушает очередь и обрабатывает сообщения
-async def consume() -> None:
+async def consume(selected_queue_name: str) -> None:
     config = load_config()
     connection = await connect_rabbitmq(config["rabbitmq_url"])
 
     try:
-        _channel, queue = await ensure_queue(connection, config["queue_name"])
+        _channel, queue = await ensure_queue(connection, selected_queue_name)
 
         async with queue.iterator() as queue_iter:
             async for message in queue_iter:
@@ -60,4 +63,13 @@ async def consume() -> None:
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(consume())
+
+    config = load_config()
+
+    selected_queue = config["queue_name"]
+
+    #при запуске ru слушаем очередь ru
+    if len(sys.argv) > 1 and sys.argv[1] == "ru":
+        selected_queue = config["ru_queue_name"]
+
+    asyncio.run(consume(selected_queue))
